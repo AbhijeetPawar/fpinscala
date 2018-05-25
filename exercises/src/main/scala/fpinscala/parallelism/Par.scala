@@ -10,10 +10,15 @@ object Par {
 
   def unit[A](a: A): Par[A] = (es: ExecutorService) => UnitFuture(a) // `unit` is represented as a function that returns a `UnitFuture`, which is a simple implementation of `Future` that just wraps a constant value. It doesn't use the `ExecutorService` at all. It's always done and can't be cancelled. Its `get` method simply returns the value that we gave it.
 
-  private case class UnitFuture[A](get: A) extends Future[A] {
+  private case class UnitFuture[A](result: A) extends Future[A] {
     def isDone = true
 
-    def get(timeout: Long, units: TimeUnit) = get
+    def get(timeout: Long, units: TimeUnit): A = result
+
+    def get(): A = {
+      println("=> " + result + " | Thread: " + Thread.currentThread().getName)
+      result
+    }
 
     def isCancelled = false
 
@@ -22,7 +27,7 @@ object Par {
 
   def fork[A](a: => Par[A]): Par[A] = // This is the simplest and most natural implementation of `fork`, but there are some problems with it--for one, the outer `Callable` will block waiting for the "inner" task to complete. Since this blocking occupies a thread in our thread pool, or whatever resource backs the `ExecutorService`, this implies that we're losing out on some potential parallelism. Essentially, we're using two threads when one should suffice. This is a symptom of a more serious problem with the implementation, and we will discuss this later in the chapter.
     es => es.submit(new Callable[A] {
-      def call = a(es).get
+      def call: A = a(es).get
     })
 
   def lazyUnit[A](a: A): Par[A] = fork(unit(a))
@@ -40,6 +45,7 @@ object Par {
   def map[A, B](pa: Par[A])(f: A => B): Par[B] =
     map2(pa, unit(()))((a, _) => f(a))
 
+  // FIXME: Will splitting xs in half and forking each half benefit us in parallelism?
   def sequence[A](xs: List[Par[A]]): Par[List[A]] = {
     xs.headOption match {
       case None => unit(Nil)
@@ -73,13 +79,11 @@ object Par {
 
   class ParOps[A](p: Par[A]) {
 
-
   }
 
 }
 
 object Examples {
-
   import Par._
 
   def sum(ints: IndexedSeq[Int]): Int = // `IndexedSeq` is a superclass of random-access sequences like `Vector` in the standard library. Unlike lists, these sequences provide an efficient `splitAt` method for dividing them into two parts at a particular index.
@@ -89,5 +93,26 @@ object Examples {
       val (l, r) = ints.splitAt(ints.length / 2) // Divide the sequence in half using the `splitAt` function.
       sum(l) + sum(r) // Recursively sum both halves and add the results together.
     }
+
+  def sumPar(ints: IndexedSeq[Int]): Par[Int] =
+    if (ints.size <= 1) {
+      Par.unit(ints.headOption getOrElse 0)
+    } else {
+      val (l, r) = ints.splitAt(ints.length / 2)
+      println(l, r)
+      Par.map2(Par.fork(sumPar(l)), Par.fork(sumPar(r)))(_ + _)
+    }
+
+  // FIXME: Creates a deadlock if number of threads are limited in ExecutorService.
+  def main(args: Array[String]): Unit = {
+    val executorService = Executors.newFixedThreadPool(16)
+    val summation: Par[Int] = sumPar(IndexedSeq(1, 2, 3, 4, 5, 6, 7, 8, 9, 10))
+
+    val result: Future[Int] = Par.run(executorService)(summation)
+
+    println("Parallel Sum: " + result.get())
+
+    executorService.shutdown()
+  }
 
 }
